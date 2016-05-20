@@ -1,0 +1,19 @@
+// NOTE: Run the following command when you modify this file.
+// /usr/local/protobuf3/bin/protoc --go_out=. *.proto
+syntax = "proto3";
+
+package main;
+
+message Job {
+  repeated string targets = 1;
+}
+
+message JobResult {
+  string target = 1;
+  string result = 2;
+}
+
+message JobResults {
+  string clientID = 1;
+  repeated JobResult results = 2;
+}
