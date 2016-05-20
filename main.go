@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"flag"
 	"fmt"
 	"log"
@@ -75,15 +74,16 @@ func serverCommand(args []string) {
 }
 
 func handleConnection(conn net.Conn) {
-	greeting, err := bufio.NewReader(conn).ReadString('\n')
+	buf, err := readLengthAndBytes(conn)
 	if err != nil {
-		fmt.Println("Error reading:", err.Error())
+		log.Fatal(err)
 	}
-	fmt.Printf("server received greeting: %s\n", greeting)
-	//	buf := make([]byte, 1024)
-	//	reqLen, err := conn.Read(buf)
-	//	conn.Write([]byte("Message received."))
-	fmt.Fprintf(conn, "Goodbye\n")
+	fmt.Printf("server received message: %s\n", string(buf))
+	msg := "goodbye."
+	err = writeLengthAndBytes(conn, []byte(msg))
+	if err != nil {
+		log.Fatal(err)
+	}
 	conn.Close()
 }
 
@@ -94,17 +94,6 @@ func workerCommand(args []string) {
 	fs.StringVar(&address, "address", "127.0.0.1:5000", "server address")
 	fs.Parse(args)
 
-	conn, err := net.Dial("tcp", address)
-	if err != nil {
-		log.Fatal(err)
-	}
-	fmt.Fprintf(conn, "Hello, world\n")
-	resp, err := bufio.NewReader(conn).ReadString('\n')
-	if err != nil {
-		log.Fatal(err)
-	}
-	fmt.Printf("client received response: %s\n", resp)
-	conn.Close()
 }
 
 func requestCommand(args []string) {
@@ -118,11 +107,15 @@ func requestCommand(args []string) {
 	if err != nil {
 		log.Fatal(err)
 	}
-	fmt.Fprintf(conn, "Hello, world\n")
-	resp, err := bufio.NewReader(conn).ReadString('\n')
+	msg := "hello, world!"
+	err = writeLengthAndBytes(conn, []byte(msg))
 	if err != nil {
 		log.Fatal(err)
 	}
-	fmt.Printf("client received response: %s\n", resp)
+	buf, err := readLengthAndBytes(conn)
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Printf("client received response: %s\n", string(buf))
 	conn.Close()
 }

@@ -4,6 +4,13 @@ syntax = "proto3";
 
 package main;
 
+enum MessageType {
+  UndefinedMsg = 0;
+  ExitMsg = 1;
+  JobMsg = 2;
+  JobResultsMsg = 3;
+}
+
 message Job {
   repeated string targets = 1;
 }
