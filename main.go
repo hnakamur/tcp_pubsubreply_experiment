@@ -74,13 +74,13 @@ func serverCommand(args []string) {
 }
 
 func handleConnection(conn net.Conn) {
-	buf, err := readLengthAndBytes(conn)
+	buf, _, err := ReadLengthAndBytes(conn)
 	if err != nil {
 		log.Fatal(err)
 	}
 	fmt.Printf("server received message: %s\n", string(buf))
 	msg := "goodbye."
-	err = writeLengthAndBytes(conn, []byte(msg))
+	_, err = WriteLengthAndBytes(conn, []byte(msg))
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -108,11 +108,11 @@ func requestCommand(args []string) {
 		log.Fatal(err)
 	}
 	msg := "hello, world!"
-	err = writeLengthAndBytes(conn, []byte(msg))
+	_, err = WriteLengthAndBytes(conn, []byte(msg))
 	if err != nil {
 		log.Fatal(err)
 	}
-	buf, err := readLengthAndBytes(conn)
+	buf, _, err := ReadLengthAndBytes(conn)
 	if err != nil {
 		log.Fatal(err)
 	}
