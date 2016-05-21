@@ -6,6 +6,8 @@ import (
 	"log"
 	"net"
 	"os"
+
+	"github.com/hnakamur/protobufio"
 )
 
 var usage = `Usage tcp_pubsubreply_experiment [Globals] <Command> [Options]
@@ -74,13 +76,27 @@ func serverCommand(args []string) {
 }
 
 func handleConnection(conn net.Conn) {
-	buf, _, err := ReadLengthAndBytes(conn)
+	var err error
+	var job Job
+	var buf []byte
+	r := protobufio.NewMessageReader(conn)
+	buf, _, _, err = r.ReadVarintLenAndMessage(&job, buf)
 	if err != nil {
 		log.Fatal(err)
 	}
-	fmt.Printf("server received message: %s\n", string(buf))
-	msg := "goodbye."
-	_, err = WriteLengthAndBytes(conn, []byte(msg))
+	fmt.Printf("server received message: %v\n", job)
+
+	results := JobResults{
+		Results: make([]*JobResult, len(job.Targets)),
+	}
+	for i, target := range job.Targets {
+		results.Results[i] = &JobResult{
+			Target: target,
+			Result: "success",
+		}
+	}
+	w := protobufio.NewMessageWriter(conn)
+	_, _, err = w.WriteVarintLenAndMessage(&results)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -103,19 +119,29 @@ func requestCommand(args []string) {
 	fs.StringVar(&address, "address", "127.0.0.1:5000", "server address")
 	fs.Parse(args)
 
+	var err error
 	conn, err := net.Dial("tcp", address)
 	if err != nil {
 		log.Fatal(err)
 	}
-	msg := "hello, world!"
-	_, err = WriteLengthAndBytes(conn, []byte(msg))
+
+	job := Job{
+		Targets: []string{"target1", "target2"},
+	}
+	w := protobufio.NewMessageWriter(conn)
+	_, _, err = w.WriteVarintLenAndMessage(&job)
 	if err != nil {
 		log.Fatal(err)
 	}
-	buf, _, err := ReadLengthAndBytes(conn)
+
+	var results JobResults
+	var buf []byte
+	r := protobufio.NewMessageReader(conn)
+	buf, _, _, err = r.ReadVarintLenAndMessage(&results, buf)
 	if err != nil {
 		log.Fatal(err)
 	}
-	fmt.Printf("client received response: %s\n", string(buf))
+	fmt.Printf("client received message: %v\n", results)
+
 	conn.Close()
 }
