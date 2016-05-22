@@ -95,18 +95,19 @@ func newServer() *server {
 
 type workerChannel struct {
 	jobC       chan *Job
+	jobSentC   chan bool
 	jobResultC chan *JobResult
 }
 
 func (s *server) registerWorker(workerID string) workerChannel {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	c := workerChannel{
 		jobC:       make(chan *Job, 1),
-		jobResultC: make(chan *JobResult),
+		jobSentC:   make(chan bool, 1),
+		jobResultC: make(chan *JobResult, 1),
 	}
+	s.mu.Lock()
 	s.workerChannels[workerID] = c
+	s.mu.Unlock()
 	return c
 }
 
@@ -117,6 +118,15 @@ func (s *server) dispatchJob() {
 		for _, workerChannel := range s.workerChannels {
 			workerChannel.jobC <- job
 		}
+
+		for workerID, workerChannel := range s.workerChannels {
+			jobSent := <-workerChannel.jobSentC
+			if !jobSent {
+				delete(s.workerChannels, workerID)
+				fmt.Printf("server unregister worker %s\n", workerID)
+			}
+		}
+
 		jobResults := &JobResults{
 			Results: make([]*JobResult, 0, len(s.workerChannels)),
 		}
@@ -159,15 +169,19 @@ func (s *server) handleConnection(conn net.Conn) {
 			if err != nil {
 				log.Fatal(err)
 			}
-			workerChannel := s.registerWorker(registerWorker.WorkerID)
-			fmt.Printf("server registered worker: %v\n", registerWorker.WorkerID)
+			workerID := registerWorker.WorkerID
+			workerChannel := s.registerWorker(workerID)
+			fmt.Printf("server registered worker: %v\n", workerID)
 			for {
 				job := <-workerChannel.jobC
 				err = rw.WriteTypeAndJob(job)
 				if err != nil {
-					log.Fatal(err)
+					log.Printf("failed to sent Job %v to worker %s, err=%v", job, workerID, err)
+					workerChannel.jobSentC <- false
+					return
 				}
-				fmt.Printf("server sent Job %v to worker %v\n", job, registerWorker.WorkerID)
+				fmt.Printf("server sent Job %v to worker %v\n", job, workerID)
+				workerChannel.jobSentC <- true
 
 				msgType, err := rw.ReadMessageType()
 				if err != nil {
@@ -179,7 +193,7 @@ func (s *server) handleConnection(conn net.Conn) {
 					if err != nil {
 						log.Fatal(err)
 					}
-					fmt.Printf("server received JobResult %v from worker %s\n", jobResult, registerWorker.WorkerID)
+					fmt.Printf("server received JobResult %v from worker %s\n", jobResult, workerID)
 					workerChannel.jobResultC <- jobResult
 				}
 			}
