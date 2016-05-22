@@ -2,6 +2,7 @@ package main
 
 import (
 	"flag"
+	"fmt"
 	"log"
 	"net"
 	"os"
@@ -22,7 +23,7 @@ var subcommandOptionsUsageFormat = "\nOptions for subcommand \"%s\":\n"
 func subcommandUsageFunc(subcommand string, fs *flag.FlagSet) func() {
 	return func() {
 		flag.Usage()
-		log.Printf(subcommandOptionsUsageFormat, subcommand)
+		fmt.Printf(subcommandOptionsUsageFormat, subcommand)
 		fs.PrintDefaults()
 	}
 }
@@ -32,7 +33,7 @@ func main() {
 	flag.BoolVar(&help, "h", false, "show help")
 
 	flag.Usage = func() {
-		log.Print(usage)
+		fmt.Print(usage)
 		flag.PrintDefaults()
 	}
 	flag.Parse()
