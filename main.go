@@ -175,13 +175,13 @@ func (s *server) handleConnection(conn net.Conn) {
 				msgType := MessageType(v)
 				fmt.Printf("server received message type %s from worker %s\n", msgType, msg.WorkerID)
 				switch msgType {
-				case MessageType_JobResultsMsg:
-					var results JobResults
-					buf, _, _, err = r.ReadVarintLenAndMessage(&results, buf)
+				case MessageType_JobResultMsg:
+					var result JobResult
+					buf, _, _, err = r.ReadVarintLenAndMessage(&result, buf)
 					if err != nil {
 						log.Fatal(err)
 					}
-					fmt.Printf("server received JobResults message %v from worker %s\n", results, msg.WorkerID)
+					fmt.Printf("server received JobResult message %v from worker %s\n", result, msg.WorkerID)
 				}
 			}
 
@@ -235,21 +235,21 @@ func workerCommand(args []string) {
 		}
 		fmt.Printf("worker %s received Job message: %v\n", workerID, job)
 
-		_, err = w.WriteVarint(int64(MessageType_JobResultsMsg))
+		_, err = w.WriteVarint(int64(MessageType_JobResultMsg))
 		if err != nil {
 			log.Fatal(err)
 		}
-		results := JobResults{
+		result := JobResult{
 			WorkerID: workerID,
-			Results:  make([]*JobResult, len(job.Targets)),
+			Results:  make([]*TargetResult, len(job.Targets)),
 		}
 		for i, target := range job.Targets {
-			results.Results[i] = &JobResult{
+			result.Results[i] = &TargetResult{
 				Target: target,
 				Result: "success",
 			}
 		}
-		_, _, err = w.WriteVarintLenAndMessage(&results)
+		_, _, err = w.WriteVarintLenAndMessage(&result)
 		if err != nil {
 			log.Fatal(err)
 		}

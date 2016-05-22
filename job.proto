@@ -8,7 +8,7 @@ enum MessageType {
   UndefinedMsg = 0;
   ExitMsg = 1;
   JobMsg = 2;
-  JobResultsMsg = 3;
+  JobResultMsg = 3;
   RegisterWorkerMsg = 4;
   UnregisterWorkerMsg = 5;
 }
@@ -17,14 +17,14 @@ message Job {
   repeated string targets = 1;
 }
 
-message JobResult {
+message TargetResult {
   string target = 1;
   string result = 2;
 }
 
-message JobResults {
+message JobResult {
   string workerID = 1;
-  repeated JobResult results = 2;
+  repeated TargetResult results = 2;
 }
 
 message RegisterWorker {
