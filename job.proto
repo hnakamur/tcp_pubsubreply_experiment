@@ -9,6 +9,8 @@ enum MessageType {
   ExitMsg = 1;
   JobMsg = 2;
   JobResultsMsg = 3;
+  RegisterWorkerMsg = 4;
+  UnregisterWorkerMsg = 5;
 }
 
 message Job {
@@ -21,6 +23,14 @@ message JobResult {
 }
 
 message JobResults {
-  string clientID = 1;
+  string workerID = 1;
   repeated JobResult results = 2;
+}
+
+message RegisterWorker {
+  string workerID = 1;
+}
+
+message UnregisterWorker {
+  string workerID = 1;
 }
