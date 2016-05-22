@@ -79,29 +79,39 @@ func serverCommand(args []string) {
 }
 
 type server struct {
-	jobC             chan Job
-	dispatchChannels map[string]chan Job
-	mu               sync.Mutex
+	jobC           chan Job
+	jobResultsC    chan []*JobResult
+	workerChannels map[string]workerChannel
+	mu             sync.Mutex
 }
 
 func newServer() *server {
 	s := &server{
-		jobC:             make(chan Job),
-		dispatchChannels: make(map[string]chan Job),
+		jobC:           make(chan Job),
+		jobResultsC:    make(chan []*JobResult),
+		workerChannels: make(map[string]workerChannel),
 	}
 	go s.dispatchJob()
 	return s
 }
 
-func (s *server) registerWorker(workerID string) chan Job {
+type workerChannel struct {
+	jobC       chan Job
+	jobResultC chan JobResult
+}
+
+func (s *server) registerWorker(workerID string) workerChannel {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	c := make(chan Job, 1)
-	s.dispatchChannels[workerID] = c
+	c := workerChannel{
+		jobC:       make(chan Job, 1),
+		jobResultC: make(chan JobResult),
+	}
+	s.workerChannels[workerID] = c
 	fmt.Printf("server added channel for workerID: %s\n", workerID)
-	for workerID, _ := range s.dispatchChannels {
-		fmt.Printf("workerID in s.dispatchChannels: %s\n", workerID)
+	for workerID, _ := range s.workerChannels {
+		fmt.Printf("workerID in s.workerChannels: %s\n", workerID)
 	}
 	return c
 }
@@ -112,12 +122,22 @@ func (s *server) dispatchJob() {
 		job := <-s.jobC
 		fmt.Printf("server received job in dispatchJob: %v\n", job)
 		s.mu.Lock()
-		for workerID, dispatchC := range s.dispatchChannels {
-			fmt.Printf("server sending job in dispatchJob %v to worker %s\n", job, workerID)
-			dispatchC <- job
-			fmt.Printf("server sent job in dispatchJob %v to worker %s\n", job, workerID)
+		for workerID, workerChannel := range s.workerChannels {
+			fmt.Printf("server sending Job %v to worker %s channel\n", job, workerID)
+			workerChannel.jobC <- job
+			fmt.Printf("server sent Job %v to worker %s channel\n", job, workerID)
+		}
+		jobResults := make([]*JobResult, 0, len(s.workerChannels))
+		for workerID, workerChannel := range s.workerChannels {
+			fmt.Printf("server waiting JobResult from worker %s channel\n", workerID)
+			jobResult := <-workerChannel.jobResultC
+			fmt.Printf("server received JobResult %v from worker %s channel\n", jobResult, workerID)
+			jobResults = append(jobResults, &jobResult)
 		}
 		s.mu.Unlock()
+		fmt.Printf("server sending jobResults to jobResultsC\n")
+		s.jobResultsC <- jobResults
+		fmt.Printf("server sent jobResults to jobResultsC\n")
 	}
 }
 
@@ -142,9 +162,21 @@ func (s *server) handleConnection(conn net.Conn) {
 			if err != nil {
 				log.Fatal(err)
 			}
-			fmt.Printf("server received Job message: %v\n", job)
+			fmt.Printf("server received Job %v\n", job)
 			s.jobC <- job
-			fmt.Printf("server sent Job to jobC: %v\n", job)
+			fmt.Printf("server sent Job %v to jobC\n", job)
+
+			jobResults := <-s.jobResultsC
+			fmt.Printf("server received JobResults %v from jobResultsC\n", jobResults)
+			_, err = w.WriteVarint(int64(MessageType_JobResultsMsg))
+			if err != nil {
+				log.Fatal(err)
+			}
+			_, _, err = w.WriteVarintLenAndMessage(&JobResults{Results: jobResults})
+			if err != nil {
+				log.Fatal(err)
+			}
+			fmt.Printf("server sent JobResults %v to client\n", jobResults)
 			return
 		case MessageType_RegisterWorkerMsg:
 			var msg RegisterWorker
@@ -153,11 +185,11 @@ func (s *server) handleConnection(conn net.Conn) {
 				log.Fatal(err)
 			}
 			fmt.Printf("server received RegisterWorker message: %v\n", msg)
-			dispatchC := s.registerWorker(msg.WorkerID)
+			workerChannel := s.registerWorker(msg.WorkerID)
 			fmt.Printf("server registered worker: %v\n", msg.WorkerID)
 			for {
 				fmt.Printf("server waiting job from dispatchC for worker %s\n", msg.WorkerID)
-				job := <-dispatchC
+				job := <-workerChannel.jobC
 				fmt.Printf("server received job from dispatchC %v. sending it to worker %s\n", job, msg.WorkerID)
 				_, err = w.WriteVarint(int64(MessageType_JobMsg))
 				if err != nil {
@@ -176,12 +208,14 @@ func (s *server) handleConnection(conn net.Conn) {
 				fmt.Printf("server received message type %s from worker %s\n", msgType, msg.WorkerID)
 				switch msgType {
 				case MessageType_JobResultMsg:
-					var result JobResult
-					buf, _, _, err = r.ReadVarintLenAndMessage(&result, buf)
+					var jobResult JobResult
+					buf, _, _, err = r.ReadVarintLenAndMessage(&jobResult, buf)
 					if err != nil {
 						log.Fatal(err)
 					}
-					fmt.Printf("server received JobResult message %v from worker %s\n", result, msg.WorkerID)
+					fmt.Printf("server received JobResult %v from worker %s\n", jobResult, msg.WorkerID)
+					workerChannel.jobResultC <- jobResult
+					fmt.Printf("server sent JobResult %v from worker %s to jobResultC\n", jobResult, msg.WorkerID)
 				}
 			}
 
@@ -228,30 +262,33 @@ func workerCommand(args []string) {
 		}
 		msgType := MessageType(v)
 		fmt.Printf("worker %s received message type from server. type: %s\n", workerID, msgType)
-		var job Job
-		buf, _, _, err = r.ReadVarintLenAndMessage(&job, buf)
-		if err != nil {
-			log.Fatal(err)
-		}
-		fmt.Printf("worker %s received Job message: %v\n", workerID, job)
-
-		_, err = w.WriteVarint(int64(MessageType_JobResultMsg))
-		if err != nil {
-			log.Fatal(err)
-		}
-		result := JobResult{
-			WorkerID: workerID,
-			Results:  make([]*TargetResult, len(job.Targets)),
-		}
-		for i, target := range job.Targets {
-			result.Results[i] = &TargetResult{
-				Target: target,
-				Result: "success",
+		switch msgType {
+		case MessageType_JobMsg:
+			var job Job
+			buf, _, _, err = r.ReadVarintLenAndMessage(&job, buf)
+			if err != nil {
+				log.Fatal(err)
 			}
-		}
-		_, _, err = w.WriteVarintLenAndMessage(&result)
-		if err != nil {
-			log.Fatal(err)
+			fmt.Printf("worker %s received Job message: %v\n", workerID, job)
+
+			_, err = w.WriteVarint(int64(MessageType_JobResultMsg))
+			if err != nil {
+				log.Fatal(err)
+			}
+			result := JobResult{
+				WorkerID: workerID,
+				Results:  make([]*TargetResult, len(job.Targets)),
+			}
+			for i, target := range job.Targets {
+				result.Results[i] = &TargetResult{
+					Target: target,
+					Result: "success",
+				}
+			}
+			_, _, err = w.WriteVarintLenAndMessage(&result)
+			if err != nil {
+				log.Fatal(err)
+			}
 		}
 	}
 }
@@ -270,7 +307,9 @@ func requestCommand(args []string) {
 	}
 	defer conn.Close()
 
+	r := protobufio.NewMessageReader(conn)
 	w := protobufio.NewMessageWriter(conn)
+
 	_, err = w.WriteVarint(int64(MessageType_JobMsg))
 	if err != nil {
 		log.Fatal(err)
@@ -281,5 +320,24 @@ func requestCommand(args []string) {
 	_, _, err = w.WriteVarintLenAndMessage(&job)
 	if err != nil {
 		log.Fatal(err)
+	}
+
+	fmt.Printf("client waiting jobResults from server.\n")
+	var v int64
+	v, _, err = r.ReadVarint()
+	if err != nil {
+		log.Fatal(err)
+	}
+	msgType := MessageType(v)
+	fmt.Printf("client received message type from server. type: %s\n", msgType)
+	switch msgType {
+	case MessageType_JobResultsMsg:
+		var jobResults JobResults
+		var buf []byte
+		buf, _, _, err = r.ReadVarintLenAndMessage(&jobResults, buf)
+		if err != nil {
+			log.Fatal(err)
+		}
+		fmt.Printf("client received JobResults: %v\n", jobResults)
 	}
 }
