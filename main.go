@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"sync"
+	"time"
 )
 
 var usage = `Usage tcp_pubsubreply_experiment [Globals] <Command> [Options]
@@ -209,51 +210,62 @@ func workerCommand(args []string) {
 	fs.StringVar(&address, "address", "127.0.0.1:5000", "server address")
 	var workerID string
 	fs.StringVar(&workerID, "id", "worker1", "worker ID")
+	var connectRetryInterval time.Duration
+	fs.DurationVar(&connectRetryInterval, "connect-retry-interval", time.Second, "connect retry interval")
 	fs.Parse(args)
 
-	conn, err := net.Dial("tcp", address)
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer conn.Close()
-
-	rw := newMessageReadWriter(conn)
-
-	err = rw.WriteTypeAndRegsiterWorker(&RegisterWorker{WorkerID: workerID})
-	if err != nil {
-		log.Fatal(err)
-	}
-	fmt.Printf("worker registered myself: %s\n", workerID)
-
 	for {
-		msgType, err := rw.ReadMessageType()
+		var rw *messageReadWriter
+		conn, err := net.Dial("tcp", address)
 		if err != nil {
-			log.Fatal(err)
+			log.Printf("worker %s failed to connect server. err=%v", workerID, err)
+			goto retryConnect
 		}
-		switch msgType {
-		case MessageType_JobMsg:
-			job, err := rw.ReadJob()
-			if err != nil {
-				log.Fatal(err)
-			}
-			fmt.Printf("worker %s received Job %v\n", workerID, job)
 
-			jobResult := &JobResult{
-				WorkerID: workerID,
-				Results:  make([]*TargetResult, len(job.Targets)),
-			}
-			for i, target := range job.Targets {
-				jobResult.Results[i] = &TargetResult{
-					Target: target,
-					Result: "success",
-				}
-			}
-			err = rw.WriteTypeAndJobResult(jobResult)
-			if err != nil {
-				log.Fatal(err)
-			}
-			fmt.Printf("worker %s sent JobResult %v\n", workerID, jobResult)
+		rw = newMessageReadWriter(conn)
+
+		err = rw.WriteTypeAndRegsiterWorker(&RegisterWorker{WorkerID: workerID})
+		if err != nil {
+			log.Printf("worker %s failed to register myself. err=%v", workerID, err)
+			goto retryConnect
 		}
+		fmt.Printf("worker registered myself: %s\n", workerID)
+
+		for {
+			msgType, err := rw.ReadMessageType()
+			if err != nil {
+				log.Printf("worker %s failed to read MessageType %v. err=%v", workerID, msgType, err)
+				goto retryConnect
+			}
+			switch msgType {
+			case MessageType_JobMsg:
+				job, err := rw.ReadJob()
+				if err != nil {
+					log.Printf("worker %s failed to read Job %v. err=%v", workerID, job, err)
+					goto retryConnect
+				}
+				fmt.Printf("worker %s received Job %v\n", workerID, job)
+
+				jobResult := &JobResult{
+					WorkerID: workerID,
+					Results:  make([]*TargetResult, len(job.Targets)),
+				}
+				for i, target := range job.Targets {
+					jobResult.Results[i] = &TargetResult{
+						Target: target,
+						Result: "success",
+					}
+				}
+				err = rw.WriteTypeAndJobResult(jobResult)
+				if err != nil {
+					log.Printf("worker %s failed to sent JobResult %v. err=%v", workerID, jobResult, err)
+					goto retryConnect
+				}
+				fmt.Printf("worker %s sent JobResult %v\n", workerID, jobResult)
+			}
+		}
+	retryConnect:
+		time.Sleep(connectRetryInterval)
 	}
 }
 
