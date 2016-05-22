@@ -2,7 +2,6 @@ package main
 
 import (
 	"flag"
-	"fmt"
 	"log"
 	"net"
 	"os"
@@ -23,7 +22,7 @@ var subcommandOptionsUsageFormat = "\nOptions for subcommand \"%s\":\n"
 func subcommandUsageFunc(subcommand string, fs *flag.FlagSet) func() {
 	return func() {
 		flag.Usage()
-		fmt.Printf(subcommandOptionsUsageFormat, subcommand)
+		log.Printf(subcommandOptionsUsageFormat, subcommand)
 		fs.PrintDefaults()
 	}
 }
@@ -33,7 +32,7 @@ func main() {
 	flag.BoolVar(&help, "h", false, "show help")
 
 	flag.Usage = func() {
-		fmt.Print(usage)
+		log.Print(usage)
 		flag.PrintDefaults()
 	}
 	flag.Parse()
@@ -94,17 +93,20 @@ func newServer() *server {
 	return s
 }
 
+type jobResultOrErr struct {
+	jobResult *JobResult
+	err       error
+}
+
 type workerChannel struct {
-	jobC       chan *Job
-	jobSentC   chan bool
-	jobResultC chan *JobResult
+	jobC            chan *Job
+	jobResultOrErrC chan *jobResultOrErr
 }
 
 func (s *server) registerWorker(workerID string) workerChannel {
 	c := workerChannel{
-		jobC:       make(chan *Job, 1),
-		jobSentC:   make(chan bool, 1),
-		jobResultC: make(chan *JobResult, 1),
+		jobC:            make(chan *Job, 1),
+		jobResultOrErrC: make(chan *jobResultOrErr, 1),
 	}
 	s.mu.Lock()
 	s.workerChannels[workerID] = c
@@ -120,20 +122,16 @@ func (s *server) dispatchJob() {
 			workerChannel.jobC <- job
 		}
 
-		for workerID, workerChannel := range s.workerChannels {
-			jobSent := <-workerChannel.jobSentC
-			if !jobSent {
-				delete(s.workerChannels, workerID)
-				fmt.Printf("server unregister worker %s\n", workerID)
-			}
-		}
-
 		jobResults := &JobResults{
 			Results: make([]*JobResult, 0, len(s.workerChannels)),
 		}
-		for _, workerChannel := range s.workerChannels {
-			jobResult := <-workerChannel.jobResultC
-			jobResults.Results = append(jobResults.Results, jobResult)
+		for workerID, workerChannel := range s.workerChannels {
+			jobResultOrErr := <-workerChannel.jobResultOrErrC
+			if jobResultOrErr.err != nil {
+				delete(s.workerChannels, workerID)
+			} else {
+				jobResults.Results = append(jobResults.Results, jobResultOrErr.jobResult)
+			}
 		}
 		s.mu.Unlock()
 		s.jobResultsC <- jobResults
@@ -147,55 +145,62 @@ func (s *server) handleConnection(conn net.Conn) {
 	for {
 		msgType, err := rw.ReadMessageType()
 		if err != nil {
-			log.Fatal(err)
+			log.Printf("failed to read MessageType, err=%v", err)
+			return
 		}
 		switch msgType {
 		case MessageType_JobMsg:
 			job, err := rw.ReadJob()
 			if err != nil {
-				log.Fatal(err)
+				log.Printf("failed to read Job from client, err=%v", err)
+				return
 			}
-			fmt.Printf("server received Job %v\n", job)
+			log.Printf("server received Job %v\n", job)
 			s.jobC <- job
 
 			jobResults := <-s.jobResultsC
 			err = rw.WriteTypeAndJobResults(jobResults)
 			if err != nil {
-				log.Fatal(err)
+				log.Printf("failed to write JobResults to client, err=%v", err)
+				return
 			}
-			fmt.Printf("server sent JobResults %v to client\n", jobResults)
+			log.Printf("server sent JobResults %v to client\n", jobResults)
 			return
 		case MessageType_RegisterWorkerMsg:
 			registerWorker, err := rw.ReadRegisterWorker()
 			if err != nil {
-				log.Fatal(err)
+				log.Printf("failed to read RegisterWorker from worker, err=%v", err)
+				return
 			}
 			workerID := registerWorker.WorkerID
 			workerChannel := s.registerWorker(workerID)
-			fmt.Printf("server registered worker: %v\n", workerID)
+			log.Printf("server registered worker: %v\n", workerID)
 			for {
 				job := <-workerChannel.jobC
 				err = rw.WriteTypeAndJob(job)
 				if err != nil {
 					log.Printf("failed to sent Job %v to worker %s, err=%v", job, workerID, err)
-					workerChannel.jobSentC <- false
+					workerChannel.jobResultOrErrC <- &jobResultOrErr{err: err}
 					return
 				}
-				fmt.Printf("server sent Job %v to worker %v\n", job, workerID)
-				workerChannel.jobSentC <- true
+				log.Printf("server sent Job %v to worker %v\n", job, workerID)
 
 				msgType, err := rw.ReadMessageType()
 				if err != nil {
-					log.Fatal(err)
+					log.Printf("failed to read MessageType from worker %s, err=%v", workerID, err)
+					workerChannel.jobResultOrErrC <- &jobResultOrErr{err: err}
+					return
 				}
 				switch msgType {
 				case MessageType_JobResultMsg:
 					jobResult, err := rw.ReadJobResult()
 					if err != nil {
-						log.Fatal(err)
+						log.Printf("failed to read JobResult from worker %s, err=%v", workerID, err)
+						workerChannel.jobResultOrErrC <- &jobResultOrErr{err: err}
+						return
 					}
-					fmt.Printf("server received JobResult %v from worker %s\n", jobResult, workerID)
-					workerChannel.jobResultC <- jobResult
+					log.Printf("server received JobResult %v from worker %s\n", jobResult, workerID)
+					workerChannel.jobResultOrErrC <- &jobResultOrErr{jobResult: jobResult}
 				}
 			}
 
@@ -229,7 +234,7 @@ func workerCommand(args []string) {
 			log.Printf("worker %s failed to register myself. err=%v", workerID, err)
 			goto retryConnect
 		}
-		fmt.Printf("worker registered myself: %s\n", workerID)
+		log.Printf("worker registered myself: %s\n", workerID)
 
 		for {
 			msgType, err := rw.ReadMessageType()
@@ -244,7 +249,7 @@ func workerCommand(args []string) {
 					log.Printf("worker %s failed to read Job %v. err=%v", workerID, job, err)
 					goto retryConnect
 				}
-				fmt.Printf("worker %s received Job %v\n", workerID, job)
+				log.Printf("worker %s received Job %v\n", workerID, job)
 
 				jobResult := &JobResult{
 					WorkerID: workerID,
@@ -261,7 +266,7 @@ func workerCommand(args []string) {
 					log.Printf("worker %s failed to sent JobResult %v. err=%v", workerID, jobResult, err)
 					goto retryConnect
 				}
-				fmt.Printf("worker %s sent JobResult %v\n", workerID, jobResult)
+				log.Printf("worker %s sent JobResult %v\n", workerID, jobResult)
 			}
 		}
 	retryConnect:
@@ -291,7 +296,7 @@ func requestCommand(args []string) {
 	if err != nil {
 		log.Fatal(err)
 	}
-	fmt.Printf("client sent Job %v to server.\n", job)
+	log.Printf("client sent Job %v to server.\n", job)
 
 	msgType, err := rw.ReadMessageType()
 	if err != nil {
@@ -303,6 +308,6 @@ func requestCommand(args []string) {
 		if err != nil {
 			log.Fatal(err)
 		}
-		fmt.Printf("client received JobResults: %v\n", *jobResults)
+		log.Printf("client received JobResults: %v\n", *jobResults)
 	}
 }
