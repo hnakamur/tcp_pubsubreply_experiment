@@ -3,11 +3,14 @@ package main
 import (
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"os"
 	"sync"
 	"time"
+
+	"github.com/hnakamur/ltsvlog"
 )
 
 var usage = `Usage tcp_pubsubreply_experiment [Globals] <Command> [Options]
@@ -60,38 +63,72 @@ func serverCommand(args []string) {
 	fs.Usage = subcommandUsageFunc("server", fs)
 	var address string
 	fs.StringVar(&address, "address", ":5000", "listen address")
+	var logFilename string
+	fs.StringVar(&logFilename, "log", "-", "log filename. default value \"-\" is stdout")
+	var debug bool
+	fs.BoolVar(&debug, "debug", false, "enable debug log")
 	fs.Parse(args)
 
-	ln, err := net.Listen("tcp", address)
+	logger, err := newLogger(logFilename, debug)
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	s := newServer()
-	for {
-		conn, err := ln.Accept()
+	s := newServer(address, logger)
+	s.Run()
+}
+
+func newLogger(filename string, debug bool) (*ltsvlog.LTSVLogger, error) {
+	var w io.Writer
+	if filename == "-" {
+		w = os.Stdout
+	} else {
+		var err error
+		w, err = os.Open(filename)
 		if err != nil {
-			log.Fatal(err)
+			return nil, err
 		}
-		go s.handleConnection(conn)
 	}
+	return ltsvlog.NewLTSVLogger(w, debug), nil
 }
 
 type server struct {
+	address        string
 	jobC           chan *Job
 	jobResultsC    chan *JobResults
 	workerChannels map[string]workerChannel
 	mu             sync.Mutex
+	logger         *ltsvlog.LTSVLogger
 }
 
-func newServer() *server {
+func newServer(address string, logger *ltsvlog.LTSVLogger) *server {
 	s := &server{
+		address:        address,
 		jobC:           make(chan *Job),
 		jobResultsC:    make(chan *JobResults),
 		workerChannels: make(map[string]workerChannel),
+		logger:         logger,
 	}
 	go s.dispatchJob()
 	return s
+}
+
+func (s *server) Run() {
+	ln, err := net.Listen("tcp", s.address)
+	if err != nil {
+		s.logger.ErrorWithStack(ltsvlog.LV{"msg", "failed to listen"},
+			ltsvlog.LV{"address", s.address},
+			ltsvlog.LV{"err", err})
+	}
+	for {
+		conn, err := ln.Accept()
+		if err != nil {
+			s.logger.ErrorWithStack(ltsvlog.LV{"msg", "error in accept"},
+				ltsvlog.LV{"address", s.address},
+				ltsvlog.LV{"err", err})
+		}
+		go s.handleConnection(conn)
+	}
 }
 
 type jobResultOrErr struct {
@@ -146,49 +183,68 @@ func (s *server) handleConnection(conn net.Conn) {
 	for {
 		msgType, err := rw.ReadMessageType()
 		if err != nil {
-			log.Printf("failed to read MessageType, err=%v", err)
+			s.logger.ErrorWithStack(ltsvlog.LV{"msg", "failed to read MessageType"},
+				ltsvlog.LV{"err", err})
 			return
 		}
 		switch msgType {
 		case MessageType_JobMsg:
 			job, err := rw.ReadJob()
 			if err != nil {
-				log.Printf("failed to read Job from client, err=%v", err)
+				s.logger.ErrorWithStack(ltsvlog.LV{"msg", "failed to read Job from client"},
+					ltsvlog.LV{"err", err})
 				return
 			}
-			log.Printf("server received Job %v\n", job)
+			if s.logger.DebugEnabled() {
+				s.logger.Debug(ltsvlog.LV{"msg", "server received Job"},
+					ltsvlog.LV{"job", job})
+			}
 			s.jobC <- job
 
 			jobResults := <-s.jobResultsC
 			err = rw.WriteTypeAndJobResults(jobResults)
 			if err != nil {
-				log.Printf("failed to write JobResults to client, err=%v", err)
+				s.logger.ErrorWithStack(ltsvlog.LV{"msg", "failed to write JobResults to client"},
+					ltsvlog.LV{"err", err}, ltsvlog.LV{"stack", ltsvlog.Stack(nil)})
 				return
 			}
-			log.Printf("server sent JobResults %v to client\n", jobResults)
+			if s.logger.DebugEnabled() {
+				s.logger.Debug(ltsvlog.LV{"msg", "server sent JobResults to client"},
+					ltsvlog.LV{"job_results", jobResults})
+			}
 			return
 		case MessageType_RegisterWorkerMsg:
 			registerWorker, err := rw.ReadRegisterWorker()
 			if err != nil {
-				log.Printf("failed to read RegisterWorker from worker, err=%v", err)
+				s.logger.ErrorWithStack(ltsvlog.LV{"msg", "failed to read RegisterWorker from worker"},
+					ltsvlog.LV{"err", err})
 				return
 			}
 			workerID := registerWorker.WorkerID
 			workerChannel := s.registerWorker(workerID)
-			log.Printf("server registered worker: %v\n", workerID)
+			if s.logger.DebugEnabled() {
+				s.logger.Debug(ltsvlog.LV{"msg", "server registered worker"}, ltsvlog.LV{"worker_id", workerID})
+			}
 			for {
 				job := <-workerChannel.jobC
 				err = rw.WriteTypeAndJob(job)
 				if err != nil {
-					log.Printf("failed to sent Job %v to worker %s, err=%v", job, workerID, err)
+					s.logger.ErrorWithStack(ltsvlog.LV{"msg", "failed to sent Job to worker"},
+						ltsvlog.LV{"err", err}, ltsvlog.LV{"job", job},
+						ltsvlog.LV{"worker_id", workerID})
 					workerChannel.jobResultOrErrC <- &jobResultOrErr{err: err}
 					return
 				}
-				log.Printf("server sent Job %v to worker %v\n", job, workerID)
+				if s.logger.DebugEnabled() {
+					s.logger.Debug(ltsvlog.LV{"msg", "server sent Job to worker"},
+						ltsvlog.LV{"job", job}, ltsvlog.LV{"worker_id", workerID})
+				}
 
 				msgType, err := rw.ReadMessageType()
 				if err != nil {
-					log.Printf("failed to read MessageType from worker %s, err=%v", workerID, err)
+					s.logger.ErrorWithStack(ltsvlog.LV{"msg", "failed to read MessageType from worker"},
+						ltsvlog.LV{"err", err},
+						ltsvlog.LV{"worker_id", workerID})
 					workerChannel.jobResultOrErrC <- &jobResultOrErr{err: err}
 					return
 				}
@@ -196,15 +252,23 @@ func (s *server) handleConnection(conn net.Conn) {
 				case MessageType_JobResultMsg:
 					jobResult, err := rw.ReadJobResult()
 					if err != nil {
-						log.Printf("failed to read JobResult from worker %s, err=%v", workerID, err)
+						s.logger.ErrorWithStack(ltsvlog.LV{"msg", "failed to read JobResult from worker"},
+							ltsvlog.LV{"err", err},
+							ltsvlog.LV{"worker_id", workerID})
 						workerChannel.jobResultOrErrC <- &jobResultOrErr{err: err}
 						return
 					}
-					log.Printf("server received JobResult %v from worker %s\n", jobResult, workerID)
+					if s.logger.DebugEnabled() {
+						s.logger.Debug(ltsvlog.LV{"msg", "server received JobResult from worker"},
+							ltsvlog.LV{"job_result", jobResult}, ltsvlog.LV{"worker_id", workerID})
+					}
 					workerChannel.jobResultOrErrC <- &jobResultOrErr{jobResult: jobResult}
 				}
 			}
-
+		default:
+			s.logger.ErrorWithStack(ltsvlog.LV{"msg", "unexpected MessageType"},
+				ltsvlog.LV{"message_type", msgType})
+			return
 		}
 	}
 }
@@ -218,13 +282,24 @@ func workerCommand(args []string) {
 	fs.StringVar(&workerID, "id", "worker1", "worker ID")
 	var connectRetryInterval time.Duration
 	fs.DurationVar(&connectRetryInterval, "connect-retry-interval", time.Second, "connect retry interval")
+	var logFilename string
+	fs.StringVar(&logFilename, "log", "-", "log filename. default value \"-\" is stdout")
+	var debug bool
+	fs.BoolVar(&debug, "debug", false, "enable debug log")
 	fs.Parse(args)
 
+	logger, err := newLogger(logFilename, debug)
+	if err != nil {
+		log.Fatal(err)
+	}
 	for {
 		var rw *messageReadWriter
 		conn, err := net.Dial("tcp", address)
 		if err != nil {
-			log.Printf("worker %s failed to connect server. err=%v", workerID, err)
+			logger.ErrorWithStack(ltsvlog.LV{"msg", "failed to connect server"},
+				ltsvlog.LV{"worker_id", workerID},
+				ltsvlog.LV{"address", address},
+				ltsvlog.LV{"err", err})
 			goto retryConnect
 		}
 
@@ -232,25 +307,37 @@ func workerCommand(args []string) {
 
 		err = rw.WriteTypeAndRegsiterWorker(&RegisterWorker{WorkerID: workerID})
 		if err != nil {
-			log.Printf("worker %s failed to register myself. err=%v", workerID, err)
+			logger.ErrorWithStack(ltsvlog.LV{"msg", "failed to register myself"},
+				ltsvlog.LV{"worker_id", workerID},
+				ltsvlog.LV{"err", err})
 			goto retryConnect
 		}
-		log.Printf("worker registered myself: %s\n", workerID)
+		if logger.DebugEnabled() {
+			logger.Debug(ltsvlog.LV{"msg", "worker registered myself"}, ltsvlog.LV{"worker_id", workerID})
+		}
 
 		for {
 			msgType, err := rw.ReadMessageType()
 			if err != nil {
-				log.Printf("worker %s failed to read MessageType %v. err=%v", workerID, msgType, err)
+				logger.ErrorWithStack(ltsvlog.LV{"msg", "failed to read MessageType"},
+					ltsvlog.LV{"worker_id", workerID},
+					ltsvlog.LV{"err", err})
 				goto retryConnect
 			}
 			switch msgType {
 			case MessageType_JobMsg:
 				job, err := rw.ReadJob()
 				if err != nil {
-					log.Printf("worker %s failed to read Job %v. err=%v", workerID, job, err)
+					logger.ErrorWithStack(ltsvlog.LV{"msg", "failed to read Job"},
+						ltsvlog.LV{"worker_id", workerID},
+						ltsvlog.LV{"err", err})
 					goto retryConnect
 				}
-				log.Printf("worker %s received Job %v\n", workerID, job)
+				if logger.DebugEnabled() {
+					logger.Debug(ltsvlog.LV{"msg", "worker received Job"},
+						ltsvlog.LV{"worker_id", workerID},
+						ltsvlog.LV{"job", job})
+				}
 
 				jobResult := &JobResult{
 					WorkerID: workerID,
@@ -264,10 +351,21 @@ func workerCommand(args []string) {
 				}
 				err = rw.WriteTypeAndJobResult(jobResult)
 				if err != nil {
-					log.Printf("worker %s failed to sent JobResult %v. err=%v", workerID, jobResult, err)
+					logger.ErrorWithStack(ltsvlog.LV{"msg", "failed to send JobResult"},
+						ltsvlog.LV{"worker_id", workerID},
+						ltsvlog.LV{"job_result", jobResult},
+						ltsvlog.LV{"err", err})
 					goto retryConnect
 				}
-				log.Printf("worker %s sent JobResult %v\n", workerID, jobResult)
+				if logger.DebugEnabled() {
+					logger.Debug(ltsvlog.LV{"msg", "worker sent JobResult"},
+						ltsvlog.LV{"worker_id", workerID},
+						ltsvlog.LV{"job_result", jobResult})
+				}
+			default:
+				logger.ErrorWithStack(ltsvlog.LV{"msg", "unexpected MessageType"},
+					ltsvlog.LV{"message_type", msgType})
+				return
 			}
 		}
 	retryConnect:
@@ -280,11 +378,22 @@ func requestCommand(args []string) {
 	fs.Usage = subcommandUsageFunc("request", fs)
 	var address string
 	fs.StringVar(&address, "address", "127.0.0.1:5000", "server address")
+	var logFilename string
+	fs.StringVar(&logFilename, "log", "-", "log filename. default value \"-\" is stdout")
+	var debug bool
+	fs.BoolVar(&debug, "debug", false, "enable debug log")
 	fs.Parse(args)
+
+	logger, err := newLogger(logFilename, debug)
+	if err != nil {
+		log.Fatal(err)
+	}
 
 	conn, err := net.Dial("tcp", address)
 	if err != nil {
-		log.Fatal(err)
+		logger.ErrorWithStack(ltsvlog.LV{"msg", "failed to connect server"},
+			ltsvlog.LV{"address", address},
+			ltsvlog.LV{"err", err})
 	}
 	defer conn.Close()
 
@@ -295,20 +404,32 @@ func requestCommand(args []string) {
 	}
 	err = rw.WriteTypeAndJob(job)
 	if err != nil {
-		log.Fatal(err)
+		logger.ErrorWithStack(ltsvlog.LV{"msg", "failed to write Job"},
+			ltsvlog.LV{"err", err})
+		os.Exit(1)
 	}
-	log.Printf("client sent Job %v to server.\n", job)
+	logger.Info(ltsvlog.LV{"msg", "client sent Job"},
+		ltsvlog.LV{"job", job})
 
 	msgType, err := rw.ReadMessageType()
 	if err != nil {
-		log.Fatal(err)
+		logger.ErrorWithStack(ltsvlog.LV{"msg", "failed to read MessageType"},
+			ltsvlog.LV{"err", err})
+		os.Exit(1)
 	}
 	switch msgType {
 	case MessageType_JobResultsMsg:
 		jobResults, err := rw.ReadJobResults()
 		if err != nil {
-			log.Fatal(err)
+			logger.ErrorWithStack(ltsvlog.LV{"msg", "failed to read JobResults"},
+				ltsvlog.LV{"err", err})
+			os.Exit(1)
 		}
-		log.Printf("client received JobResults: %v\n", *jobResults)
+		logger.Info(ltsvlog.LV{"msg", "client received JobResults"},
+			ltsvlog.LV{"job_results", jobResults})
+	default:
+		logger.ErrorWithStack(ltsvlog.LV{"msg", "unexpected MessageType"},
+			ltsvlog.LV{"message_type", msgType})
+		os.Exit(1)
 	}
 }
