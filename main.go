@@ -205,7 +205,7 @@ func (s *server) handleConnection(conn net.Conn) {
 			err = rw.WriteTypeAndJobResults(jobResults)
 			if err != nil {
 				s.logger.ErrorWithStack(ltsvlog.LV{"msg", "failed to write JobResults to client"},
-					ltsvlog.LV{"err", err}, ltsvlog.LV{"stack", ltsvlog.Stack(nil)})
+					ltsvlog.LV{"err", err})
 				return
 			}
 			if s.logger.DebugEnabled() {
