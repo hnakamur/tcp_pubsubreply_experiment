@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math/rand"
 	"net"
 	"os"
 	"sync"
@@ -68,6 +69,8 @@ func serverCommand(args []string) {
 	fs.StringVar(&address, "address", ":5000", "listen address")
 	var logFilename string
 	fs.StringVar(&logFilename, "log", "-", "log filename. default value \"-\" is stdout")
+	var jobTimeout time.Duration
+	fs.DurationVar(&jobTimeout, "job-timeout", 3*time.Second, "job timeout duration")
 	var debug bool
 	fs.BoolVar(&debug, "debug", false, "enable debug log")
 	fs.Parse(args)
@@ -77,7 +80,7 @@ func serverCommand(args []string) {
 		log.Fatal(err)
 	}
 
-	s := newServer(address, logger)
+	s := newServer(address, jobTimeout, logger)
 	s.Run()
 }
 
@@ -97,6 +100,7 @@ func newLogger(filename string, debug bool) (*ltsvlog.LTSVLogger, error) {
 
 type server struct {
 	address        string
+	jobTimeout     time.Duration
 	jobC           chan msg.Job
 	jobResultsC    chan msg.JobResults
 	workerChannels map[string]workerChannel
@@ -104,9 +108,10 @@ type server struct {
 	logger         *ltsvlog.LTSVLogger
 }
 
-func newServer(address string, logger *ltsvlog.LTSVLogger) *server {
+func newServer(address string, jobTimeout time.Duration, logger *ltsvlog.LTSVLogger) *server {
 	s := &server{
 		address:        address,
+		jobTimeout:     jobTimeout,
 		jobC:           make(chan msg.Job),
 		jobResultsC:    make(chan msg.JobResults),
 		workerChannels: make(map[string]workerChannel),
@@ -223,8 +228,8 @@ func (s *server) handleConnection(conn net.Conn) {
 			}
 			return
 		case msg.RegisterWorkerMsg:
-			registerWorker := new(msg.RegisterWorker)
-			err := msg.DecodeRegisterWorker(dec, registerWorker)
+			var registerWorker msg.RegisterWorker
+			err := msg.DecodeRegisterWorker(dec, &registerWorker)
 			if err != nil {
 				s.logger.ErrorWithStack(ltsvlog.LV{"msg", "failed to read RegisterWorker from worker"},
 					ltsvlog.LV{"err", err})
@@ -245,11 +250,22 @@ func (s *server) handleConnection(conn net.Conn) {
 					workerChannel.jobResultOrErrC <- jobResultOrErr{err: err}
 					return
 				}
+				due := time.Now().UTC().Add(s.jobTimeout)
 				if s.logger.DebugEnabled() {
 					s.logger.Debug(ltsvlog.LV{"msg", "server sent Job to worker"},
-						ltsvlog.LV{"job", job}, ltsvlog.LV{"worker_id", workerID})
+						ltsvlog.LV{"job", job}, ltsvlog.LV{"worker_id", workerID},
+						ltsvlog.LV{"due", due.Format(time.RFC3339Nano)})
 				}
 
+				err = conn.SetReadDeadline(due)
+				if err != nil {
+					s.logger.ErrorWithStack(ltsvlog.LV{"msg", "failed to set read deadline"},
+						ltsvlog.LV{"err", err},
+						ltsvlog.LV{"worker_id", workerID},
+						ltsvlog.LV{"due", due})
+					workerChannel.jobResultOrErrC <- jobResultOrErr{err: err}
+					return
+				}
 				msgType, err := msg.DecodeMessageType(dec)
 				if err != nil {
 					s.logger.ErrorWithStack(ltsvlog.LV{"msg", "failed to read MessageType from worker"},
@@ -293,6 +309,8 @@ func workerCommand(args []string) {
 	fs.StringVar(&workerID, "id", "worker1", "worker ID")
 	var connectRetryInterval time.Duration
 	fs.DurationVar(&connectRetryInterval, "connect-retry-interval", time.Second, "connect retry interval")
+	var jobMaxDuration time.Duration
+	fs.DurationVar(&jobMaxDuration, "job-max-duration", 5*time.Second, "job max duration")
 	var logFilename string
 	fs.StringVar(&logFilename, "log", "-", "log filename. default value \"-\" is stdout")
 	var debug bool
@@ -303,6 +321,7 @@ func workerCommand(args []string) {
 	if err != nil {
 		log.Fatal(err)
 	}
+	rand.Seed(time.Now().Unix())
 	for {
 		var dec *msgpack.Decoder
 		var enc *msgpack.Encoder
@@ -351,11 +370,14 @@ func workerCommand(args []string) {
 						ltsvlog.LV{"err", err})
 					goto retryConnect
 				}
+				jobDuration := time.Duration(rand.Int63n(int64(jobMaxDuration)))
 				if logger.DebugEnabled() {
 					logger.Debug(ltsvlog.LV{"msg", "worker received Job"},
 						ltsvlog.LV{"worker_id", workerID},
-						ltsvlog.LV{"job", job})
+						ltsvlog.LV{"job", job},
+						ltsvlog.LV{"jobDuration ", jobDuration})
 				}
+				time.Sleep(jobDuration)
 
 				jobResult := msg.JobResult{
 					WorkerID: workerID,
