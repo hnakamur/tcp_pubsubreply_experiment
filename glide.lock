@@ -1,0 +1,34 @@
+hash: 308bfa3ad7fc862b21c5cabefa1c39d59e9e99d00d2e66ec07a4628710fd7bbb
+updated: 2016-06-04T23:10:10.140772779+09:00
+imports:
+- name: github.com/gogo/protobuf
+  version: 7883e1468d48d969e1c3ce4bcde89b6a7dd4adc4
+  subpackages:
+  - proto
+- name: github.com/golang/protobuf
+  version: 3b06fc7a4cad73efce5fe6217ab6c33e7231ab4a
+  subpackages:
+  - proto
+- name: github.com/hnakamur/ltsvlog
+  version: a219d340576d1498260816ee834c00e66d46b50e
+- name: github.com/hnakamur/protobufio
+  version: 1f9a1f1db800a25de7a574db219e7fd68e416147
+- name: golang.org/x/net
+  version: c4c3ea71919de159c9e246d7be66deb7f0a39a58
+  subpackages:
+  - context
+- name: google.golang.org/appengine
+  version: 7f59a8c76b8594d06044bfe0bcbe475cb2020482
+  subpackages:
+  - datastore
+  - internal
+  - internal/datastore
+  - internal/app_identity
+  - internal/modules
+  - internal/base
+  - internal/remote_api
+- name: gopkg.in/vmihailenco/msgpack.v2
+  version: 851cd631b60599a692b136c60eb6eb2899b0e664
+  subpackages:
+  - codes
+devImports: []
