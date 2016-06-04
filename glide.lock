@@ -1,18 +1,12 @@
-hash: 308bfa3ad7fc862b21c5cabefa1c39d59e9e99d00d2e66ec07a4628710fd7bbb
-updated: 2016-06-04T23:10:10.140772779+09:00
+hash: 6c985a14889d9d184db7ef691f06288587c304353e99bfc9510b26a72300531f
+updated: 2016-06-05T05:10:18.385632345+09:00
 imports:
-- name: github.com/gogo/protobuf
-  version: 7883e1468d48d969e1c3ce4bcde89b6a7dd4adc4
-  subpackages:
-  - proto
 - name: github.com/golang/protobuf
   version: 3b06fc7a4cad73efce5fe6217ab6c33e7231ab4a
   subpackages:
   - proto
 - name: github.com/hnakamur/ltsvlog
   version: a219d340576d1498260816ee834c00e66d46b50e
-- name: github.com/hnakamur/protobufio
-  version: 1f9a1f1db800a25de7a574db219e7fd68e416147
 - name: golang.org/x/net
   version: c4c3ea71919de159c9e246d7be66deb7f0a39a58
   subpackages:

@@ -1,8 +1,4 @@
 package: github.com/hnakamur/tcp_pubsubreply_experiment
 import:
-- package: github.com/golang/protobuf
-  subpackages:
-  - proto
 - package: github.com/hnakamur/ltsvlog
-- package: github.com/hnakamur/protobufio
 - package: gopkg.in/vmihailenco/msgpack.v2
