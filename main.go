@@ -97,8 +97,8 @@ func newLogger(filename string, debug bool) (*ltsvlog.LTSVLogger, error) {
 
 type server struct {
 	address        string
-	jobC           chan *msg.Job
-	jobResultsC    chan *msg.JobResults
+	jobC           chan msg.Job
+	jobResultsC    chan msg.JobResults
 	workerChannels map[string]workerChannel
 	mu             sync.Mutex
 	logger         *ltsvlog.LTSVLogger
@@ -107,8 +107,8 @@ type server struct {
 func newServer(address string, logger *ltsvlog.LTSVLogger) *server {
 	s := &server{
 		address:        address,
-		jobC:           make(chan *msg.Job),
-		jobResultsC:    make(chan *msg.JobResults),
+		jobC:           make(chan msg.Job),
+		jobResultsC:    make(chan msg.JobResults),
 		workerChannels: make(map[string]workerChannel),
 		logger:         logger,
 	}
@@ -139,19 +139,19 @@ func (s *server) Run() {
 }
 
 type jobResultOrErr struct {
-	jobResult *msg.JobResult
+	jobResult msg.JobResult
 	err       error
 }
 
 type workerChannel struct {
-	jobC            chan *msg.Job
-	jobResultOrErrC chan *jobResultOrErr
+	jobC            chan msg.Job
+	jobResultOrErrC chan jobResultOrErr
 }
 
 func (s *server) registerWorker(workerID string) workerChannel {
 	c := workerChannel{
-		jobC:            make(chan *msg.Job, 1),
-		jobResultOrErrC: make(chan *jobResultOrErr, 1),
+		jobC:            make(chan msg.Job, 1),
+		jobResultOrErrC: make(chan jobResultOrErr, 1),
 	}
 	s.mu.Lock()
 	s.workerChannels[workerID] = c
@@ -167,7 +167,7 @@ func (s *server) dispatchJob() {
 			workerChannel.jobC <- job
 		}
 
-		jobResults := &msg.JobResults{
+		jobResults := msg.JobResults{
 			Results: make([]msg.JobResult, 0, len(s.workerChannels)),
 		}
 		for workerID, workerChannel := range s.workerChannels {
@@ -175,7 +175,7 @@ func (s *server) dispatchJob() {
 			if jobResultOrErr.err != nil {
 				delete(s.workerChannels, workerID)
 			} else {
-				jobResults.Results = append(jobResults.Results, *jobResultOrErr.jobResult)
+				jobResults.Results = append(jobResults.Results, jobResultOrErr.jobResult)
 			}
 		}
 		s.mu.Unlock()
@@ -208,10 +208,10 @@ func (s *server) handleConnection(conn net.Conn) {
 				s.logger.Debug(ltsvlog.LV{"msg", "server received Job"},
 					ltsvlog.LV{"job", job})
 			}
-			s.jobC <- &job
+			s.jobC <- job
 
 			jobResults := <-s.jobResultsC
-			err = msg.EncodeTypeAndJobResults(enc, jobResults)
+			err = msg.EncodeTypeAndJobResults(enc, &jobResults)
 			if err != nil {
 				s.logger.ErrorWithStack(ltsvlog.LV{"msg", "failed to write JobResults to client"},
 					ltsvlog.LV{"err", err})
@@ -219,7 +219,7 @@ func (s *server) handleConnection(conn net.Conn) {
 			}
 			if s.logger.DebugEnabled() {
 				s.logger.Debug(ltsvlog.LV{"msg", "server sent JobResults to client"},
-					ltsvlog.LV{"job_results", *jobResults})
+					ltsvlog.LV{"job_results", jobResults})
 			}
 			return
 		case msg.RegisterWorkerMsg:
@@ -237,17 +237,17 @@ func (s *server) handleConnection(conn net.Conn) {
 			}
 			for {
 				job := <-workerChannel.jobC
-				err = msg.EncodeTypeAndJob(enc, job)
+				err = msg.EncodeTypeAndJob(enc, &job)
 				if err != nil {
 					s.logger.ErrorWithStack(ltsvlog.LV{"msg", "failed to sent Job to worker"},
 						ltsvlog.LV{"err", err}, ltsvlog.LV{"job", job},
 						ltsvlog.LV{"worker_id", workerID})
-					workerChannel.jobResultOrErrC <- &jobResultOrErr{err: err}
+					workerChannel.jobResultOrErrC <- jobResultOrErr{err: err}
 					return
 				}
 				if s.logger.DebugEnabled() {
 					s.logger.Debug(ltsvlog.LV{"msg", "server sent Job to worker"},
-						ltsvlog.LV{"job", *job}, ltsvlog.LV{"worker_id", workerID})
+						ltsvlog.LV{"job", job}, ltsvlog.LV{"worker_id", workerID})
 				}
 
 				msgType, err := msg.DecodeMessageType(dec)
@@ -255,7 +255,7 @@ func (s *server) handleConnection(conn net.Conn) {
 					s.logger.ErrorWithStack(ltsvlog.LV{"msg", "failed to read MessageType from worker"},
 						ltsvlog.LV{"err", err},
 						ltsvlog.LV{"worker_id", workerID})
-					workerChannel.jobResultOrErrC <- &jobResultOrErr{err: err}
+					workerChannel.jobResultOrErrC <- jobResultOrErr{err: err}
 					return
 				}
 				switch msgType {
@@ -266,14 +266,14 @@ func (s *server) handleConnection(conn net.Conn) {
 						s.logger.ErrorWithStack(ltsvlog.LV{"msg", "failed to read JobResult from worker"},
 							ltsvlog.LV{"err", err},
 							ltsvlog.LV{"worker_id", workerID})
-						workerChannel.jobResultOrErrC <- &jobResultOrErr{err: err}
+						workerChannel.jobResultOrErrC <- jobResultOrErr{err: err}
 						return
 					}
 					if s.logger.DebugEnabled() {
 						s.logger.Debug(ltsvlog.LV{"msg", "server received JobResult from worker"},
 							ltsvlog.LV{"job_result", jobResult}, ltsvlog.LV{"worker_id", workerID})
 					}
-					workerChannel.jobResultOrErrC <- &jobResultOrErr{jobResult: &jobResult}
+					workerChannel.jobResultOrErrC <- jobResultOrErr{jobResult: jobResult}
 				}
 			}
 		default:
@@ -422,17 +422,17 @@ func requestCommand(args []string) {
 	dec := msgpack.NewDecoder(conn)
 	enc := msgpack.NewEncoder(conn)
 
-	job := &msg.Job{
+	job := msg.Job{
 		Targets: []string{"target1", "target2"},
 	}
-	err = msg.EncodeTypeAndJob(enc, job)
+	err = msg.EncodeTypeAndJob(enc, &job)
 	if err != nil {
 		logger.ErrorWithStack(ltsvlog.LV{"msg", "failed to write Job"},
 			ltsvlog.LV{"err", err})
 		os.Exit(1)
 	}
 	logger.Info(ltsvlog.LV{"msg", "client sent Job"},
-		ltsvlog.LV{"job", *job})
+		ltsvlog.LV{"job", job})
 
 	msgType, err := msg.DecodeMessageType(dec)
 	if err != nil {
